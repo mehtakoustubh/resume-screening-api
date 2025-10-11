@@ -120,7 +120,18 @@ class HybridResumeRanker:
     def get_embedding(self, text: str):
         """Get embeddings from Hugging Face API"""
         try:
-            response = requests.post(self.hf_url, headers=self.hf_headers, json={"inputs": text})
-            return response.json() if response.status_code == 200 else None
-        except:
+            response = requests.post(
+                self.hf_url, 
+                headers=self.hf_headers, 
+                json={"inputs": text},
+                timeout=30
+            )
+            print(f"HF API Status: {response.status_code}")  # ← ADDED DEBUG LINE
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"HF API Error: {response.text}")  # ← ADDED DEBUG LINE
+                return None
+        except Exception as e:
+            print(f"HF API Exception: {e}")  # ← ADDED DEBUG LINE
             return None
