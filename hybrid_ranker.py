@@ -7,7 +7,7 @@ import google.generativeai as genai
 class HybridResumeRanker:
     def __init__(self):
         # CHANGED: Use feature-extraction pipeline instead of similarity model
-        self.hf_url = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
+        self.hf_url = "https://api-inference.huggingface.co/models/sentence-transformers/paraphrase-MiniLM-L6-v2"
         self.hf_headers = {"Authorization": f"Bearer {os.getenv('HF_API_TOKEN')}"}
         
         genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
