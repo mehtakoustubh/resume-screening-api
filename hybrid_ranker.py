@@ -6,7 +6,8 @@ import google.generativeai as genai
 
 class HybridResumeRanker:
     def __init__(self):
-        self.hf_url = "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2"
+        # CHANGED: Use feature-extraction pipeline instead of similarity model
+        self.hf_url = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
         self.hf_headers = {"Authorization": f"Bearer {os.getenv('HF_API_TOKEN')}"}
         
         genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
@@ -126,12 +127,12 @@ class HybridResumeRanker:
                 json={"inputs": text},
                 timeout=30
             )
-            print(f"HF API Status: {response.status_code}")  # ← ADDED DEBUG LINE
+            print(f"HF API Status: {response.status_code}")
             if response.status_code == 200:
                 return response.json()
             else:
-                print(f"HF API Error: {response.text}")  # ← ADDED DEBUG LINE
+                print(f"HF API Error: {response.text}")
                 return None
         except Exception as e:
-            print(f"HF API Exception: {e}")  # ← ADDED DEBUG LINE
+            print(f"HF API Exception: {e}")
             return None
