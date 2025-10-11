@@ -2,10 +2,5 @@ fastapi
 uvicorn
 sentence-transformers
 google-generativeai
-python-multipart
-python-dotenv
 pydantic
-torch
-scikit-learn
-pandas
-numpy
+python-dotenv
