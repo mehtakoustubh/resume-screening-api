@@ -1,46 +1,22 @@
 import os
-from dotenv import load_dotenv
-from typing import List, Dict,Tuple
+import requests
+import numpy as np
+from typing import List, Dict, Tuple
 import google.generativeai as genai
-from sentence_transformers import SentenceTransformer, util  #  ADD THIS
-import torch  #  ADD THIS
-
-# Load environment variables
-load_dotenv()
 
 class HybridResumeRanker:
     def __init__(self):
-        print(" Initializing Hybrid Resume Ranker with SBERT + Gemini Flash...")
+        self.hf_url = "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2"
+        self.hf_headers = {"Authorization": f"Bearer {os.getenv('HF_API_TOKEN')}"}
         
-        # Get API key from environment
-        gemini_api_key = os.getenv('GEMINI_API_KEY')
-        if not gemini_api_key:
-            raise ValueError(" GEMINI_API_KEY not found in .env file")
-        
-        # Configure Gemini with Flash model
-        genai.configure(api_key=gemini_api_key)
+        genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
         self.gemini = genai.GenerativeModel('models/gemini-2.0-flash')
-        
-        
-        # INITIALIZE SBERT MODEL
-        self.sbert = SentenceTransformer('all-MiniLM-L6-v2')
-        
-        print(" SBERT + Gemini 1.5 Flash hybrid model configured")
     
     def process(self, job_desc: str, resumes: List[str], top_k: int = 10) -> Dict:
-        """
-         CORRECT HYBRID PIPELINE:
-        1. SBERT filters top resumes
-        2. Gemini scores only the shortlisted ones
-        """
-        print(f" Processing {len(resumes)} resumes with hybrid approach...")
-        
-        # STEP 1: SBERT Semantic Filtering
-        print(" SBERT: Filtering top resumes...")
+        # Step 1: SBERT filtering via Hugging Face API
         top_resumes = self._sbert_filter(job_desc, resumes, top_k)
         
-        # STEP 2: Gemini Qualitative Scoring
-        print(" Gemini: Scoring shortlisted resumes...")
+        # Step 2: Gemini scoring (YOUR EXACT CODE)
         ranked_results = self._get_gemini_scores(job_desc, top_resumes)
         
         return {
@@ -50,29 +26,26 @@ class HybridResumeRanker:
             "rankings": ranked_results
         }
     
-    def _sbert_filter(self, job_desc: str, resumes: List[str], top_k: int) -> List[tuple]:
-        """SBERT semantic filtering - returns top resumes with scores"""
-        # Encode job description and resumes
-        job_embedding = self.sbert.encode(job_desc, convert_to_tensor=True)
-        resume_embeddings = self.sbert.encode(resumes, convert_to_tensor=True)
+    def _sbert_filter(self, job_desc: str, resumes: List[str], top_k: int) -> List[Dict]:
+        """SBERT filtering via Hugging Face API"""
+        job_emb = self.get_embedding(job_desc)
+        if not job_emb:
+            return []
         
-        # Calculate cosine similarities
-        cos_scores = util.cos_sim(job_embedding, resume_embeddings)[0]
+        similarities = []
+        for i, resume in enumerate(resumes):
+            resume_emb = self.get_embedding(resume)
+            if resume_emb:
+                similarity = np.dot(job_emb, resume_emb) / (np.linalg.norm(job_emb) * np.linalg.norm(resume_emb))
+                similarities.append((i, resume, similarity))
         
-        # Get top-k resumes
-        top_results = torch.topk(cos_scores, k=min(top_k, len(resumes)))
-        
-        # Return list of (index, resume_text, sbert_score)
-        top_resumes = []
-        for score, idx in zip(top_results[0], top_results[1]):
-            top_resumes.append({
-                'index': idx.item(),
-                'resume_text': resumes[idx],
-                'sbert_similarity': round(score.item() * 10, 2)  # Scale to 0-10
-            })
-        
-        print(f" SBERT filtered: {len(top_resumes)} resumes")
-        return top_resumes
+        # Get top-k
+        similarities.sort(key=lambda x: x[2], reverse=True)
+        return [{
+            'index': idx,
+            'resume_text': resume,
+            'sbert_similarity': round(score * 10, 2)
+        } for idx, resume, score in similarities[:top_k]]
     
     def _get_gemini_scores(self, job_desc: str, top_resumes: List[Dict]) -> List[Dict]:
         """Gemini scores only the SBERT-filtered resumes"""
@@ -82,8 +55,6 @@ class HybridResumeRanker:
             resume_text = resume_data['resume_text']
             original_index = resume_data['index']
             sbert_score = resume_data['sbert_similarity']
-            
-            print(f" Gemini evaluating resume {original_index + 1}...")
             
             prompt = f"""
             ACT as an expert resume screening AI. Evaluate how well this resume matches the job description.
@@ -114,7 +85,6 @@ class HybridResumeRanker:
                 })
                 
             except Exception as e:
-                print(f" Error with resume {original_index + 1}: {e}")
                 results.append({
                     'resume_index': original_index,
                     'gemini_score': 5.0,
@@ -123,7 +93,6 @@ class HybridResumeRanker:
                     'resume_preview': resume_text[:200] + "..." if len(resume_text) > 200 else resume_text
                 })
         
-        # Sort by Gemini score (highest first)
         results.sort(key=lambda x: x['gemini_score'], reverse=True)
         return results
     
@@ -145,7 +114,13 @@ class HybridResumeRanker:
                 explanation = "No explanation provided"
                 
             return score, explanation
-            
         except Exception as e:
-            print(f" Error parsing Gemini response: {e}")
             return 5.0, "Error in evaluation"
+    
+    def get_embedding(self, text: str):
+        """Get embeddings from Hugging Face API"""
+        try:
+            response = requests.post(self.hf_url, headers=self.hf_headers, json={"inputs": text})
+            return response.json() if response.status_code == 200 else None
+        except:
+            return None
