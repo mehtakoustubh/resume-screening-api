@@ -9,7 +9,7 @@ import os
 import base64
 import pdfplumber
 from io import BytesIO
-import pandas as pd
+import csv  # 🆕 Use built-in CSV module instead of pandas
 
 load_dotenv()
 
@@ -60,27 +60,35 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
         raise HTTPException(status_code=400, detail=f"PDF text extraction failed: {str(e)}")
 
 def process_csv_file(csv_file: UploadFile) -> List[str]:
-    """Process CSV file and extract resumes"""
+    """Process CSV file using built-in csv module (NO PANDAS)"""
     try:
-        df = pd.read_csv(csv_file.file)
+        # Read CSV content as text
+        content = csv_file.file.read().decode('utf-8')
+        lines = content.splitlines()
+        
+        # Parse CSV
+        reader = csv.DictReader(lines)
         resumes = []
         
-        for _, row in df.iterrows():
+        for row in reader:
             parts = []
-            if 'name' in row and pd.notna(row['name']):
+            # Check each field and add if present and not empty
+            if row.get('name') and row['name'].strip():
                 parts.append(f"Name: {row['name']}")
-            if 'experience' in row and pd.notna(row['experience']):
+            if row.get('experience') and row['experience'].strip():
                 parts.append(f"Experience: {row['experience']}")
-            if 'skills' in row and pd.notna(row['skills']):
+            if row.get('skills') and row['skills'].strip():
                 parts.append(f"Skills: {row['skills']}")
-            if 'resume_text' in row and pd.notna(row['resume_text']):
+            if row.get('resume_text') and row['resume_text'].strip():
                 parts.append(f"Summary: {row['resume_text']}")
             
+            # Only add if we have some content
             if parts:
                 resumes.append("\n".join(parts))
         
-        print(f"📊 Processed {len(resumes)} resumes from CSV")
+        print(f"📊 Processed {len(resumes)} resumes from CSV (without pandas)")
         return resumes
+        
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"CSV processing failed: {str(e)}")
 
@@ -109,7 +117,7 @@ async def rank_resumes_multiple_formats(
             if extracted_text:
                 all_resumes.append(extracted_text)
         
-        # 2. Process CSV files
+        # 2. Process CSV files (without pandas)
         for csv_file in csv_files:
             if csv_file.content_type not in ["text/csv", "application/vnd.ms-excel"]:
                 continue
