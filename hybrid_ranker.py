@@ -76,7 +76,7 @@ class HybridResumeRanker:
         top_candidates = [{
             'index': idx,
             'resume_text': resume,
-            'sbert_similarity': round(score * 10, 2)  # Convert to 0-10 scale
+            'sbert_similarity': round(score * 100, 1)  # Convert to 0-10 scale
         } for idx, resume, score in similarities[:top_k]]
         
         print(f"🎯 SBERT found {len(top_candidates)} candidates with similarities: {[c['sbert_similarity'] for c in top_candidates]}")
