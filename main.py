@@ -203,7 +203,7 @@ async def rank_resumes_multiple_formats(
         # 1. Process PDF files with better error handling
         for pdf_file in pdf_files:
             print(f"📄 Processing PDF: {pdf_file.filename}")
-            if pdf_file.content_type != "application/pdf":
+            if pdf_file.content_type not in ["application/pdf", "application/octet-stream"]:
                 print(f"❌ Wrong content type: {pdf_file.content_type}")
                 continue
                 
