@@ -9,7 +9,8 @@ import os
 import base64
 import pdfplumber
 from io import BytesIO
-import csv  # 🆕 Use built-in CSV module instead of pandas
+import csv
+import re  # 🆕 Added for text cleaning
 
 load_dotenv()
 
@@ -46,18 +47,81 @@ class ComprehensiveResponse(BaseModel):
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     """
-    Extract text from PDF bytes using pdfplumber for better accuracy
+    Extract text from PDF bytes using pdfplumber with multiple strategies
     """
     try:
         text = ""
         with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
             for page in pdf.pages:
-                page_text = page.extract_text()
+                # Try multiple extraction strategies
+                page_text = page.extract_text() or ""
+                
+                # If basic extraction fails, try with layout
+                if not page_text.strip():
+                    page_text = page.extract_text(
+                        layout=True,  # Preserve layout
+                        x_tolerance=2,
+                        y_tolerance=2
+                    ) or ""
+                
+                # If still no text, try extracting tables
+                if not page_text.strip():
+                    tables = page.extract_tables()
+                    for table in tables:
+                        for row in table:
+                            if row:
+                                page_text += ' '.join([str(cell) for cell in row if cell]) + '\n'
+                
                 if page_text:
                     text += page_text + "\n\n"
-        return text.strip()
+        
+        # Clean the extracted text
+        cleaned_text = clean_pdf_text(text)
+        
+        if not cleaned_text.strip():
+            return "Error: No readable text could be extracted from this PDF"
+            
+        return cleaned_text.strip()
+        
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"PDF text extraction failed: {str(e)}")
+
+def clean_pdf_text(text: str) -> str:
+    """
+    Clean PDF-extracted text to make it more readable for AI
+    """
+    if not text:
+        return ""
+    
+    # Remove excessive whitespace but preserve paragraph breaks
+    lines = text.split('\n')
+    cleaned_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        # Remove common PDF artifacts
+        artifacts = [
+            '\x00', '\x0c', '\uf0b7', '•\u200b', '', '·', '▪'
+        ]
+        for artifact in artifacts:
+            line = line.replace(artifact, '')
+        
+        # Remove lines that are just special characters or too short
+        if (len(line) > 3 and 
+            any(c.isalnum() for c in line) and
+            not line.replace('.', '').replace('-', '').replace(' ', '').isdigit()):
+            cleaned_lines.append(line)
+    
+    # Join with single newlines, preserve paragraph structure
+    cleaned_text = '\n'.join(cleaned_lines)
+    
+    # Remove excessive line breaks but keep paragraphs
+    cleaned_text = re.sub(r'\n\s*\n', '\n\n', cleaned_text)
+    
+    # Fix encoding issues
+    cleaned_text = cleaned_text.encode('ascii', 'ignore').decode('ascii')
+    
+    return cleaned_text.strip()
 
 def process_csv_file(csv_file: UploadFile) -> List[str]:
     """Process CSV file using built-in csv module (NO PANDAS)"""
@@ -101,21 +165,34 @@ async def rank_resumes_multiple_formats(
     text_resumes: List[str] = Form([])
 ):
     """
-    🚀 NEW: Handle PDF, CSV, and text resumes in one endpoint
+    🚀 Handle PDF, CSV, and text resumes in one endpoint
     """
     print(f"📁 Processing: {len(pdf_files)} PDFs, {len(csv_files)} CSVs, {len(text_resumes)} text resumes")
     
     all_resumes = []
+    failed_pdfs = []  # 🆕 Track failed PDFs
     
     try:
-        # 1. Process PDF files
+        # 1. Process PDF files with better error handling
         for pdf_file in pdf_files:
             if pdf_file.content_type != "application/pdf":
                 continue
-            pdf_bytes = await pdf_file.read()
-            extracted_text = extract_text_from_pdf(pdf_bytes)
-            if extracted_text:
-                all_resumes.append(extracted_text)
+                
+            try:
+                pdf_bytes = await pdf_file.read()
+                extracted_text = extract_text_from_pdf(pdf_bytes)
+                
+                # 🆕 Check if extraction was successful
+                if extracted_text and not extracted_text.startswith("Error:"):
+                    all_resumes.append(extracted_text)
+                    print(f"✅ Successfully extracted text from {pdf_file.filename}")
+                else:
+                    failed_pdfs.append(pdf_file.filename)
+                    print(f"❌ Failed to extract readable text from {pdf_file.filename}")
+                    
+            except Exception as e:
+                failed_pdfs.append(pdf_file.filename)
+                print(f"❌ Error processing {pdf_file.filename}: {e}")
         
         # 2. Process CSV files (without pandas)
         for csv_file in csv_files:
@@ -127,7 +204,7 @@ async def rank_resumes_multiple_formats(
         # 3. Add text resumes directly
         all_resumes.extend(text_resumes)
         
-        print(f"📊 Total resumes to process: {len(all_resumes)}")
+        print(f"Total resumes to process: {len(all_resumes)}")
         
         if not all_resumes:
             raise HTTPException(status_code=400, detail="No valid resumes found in uploaded files")
@@ -135,20 +212,24 @@ async def rank_resumes_multiple_formats(
         # Apply demo limits (8 resumes max)
         if len(all_resumes) > 8:
             all_resumes = all_resumes[:8]
-            print(f"📦 Limited to 8 resumes for demo")
+            print(f" Limited to 8 resumes for demo")
         
-        # 4. Use hybrid ranker (with text-only optimization)
+        # 4. Use hybrid ranker (now always consistent)
         ranking_results = ranker.process(
             job_desc=job_description,
             resumes=all_resumes,
             top_k=8
         )
         
-        return {
+        # 🆕 Include failed PDFs in response
+        response_data = {
             "job_description": job_description,
             "total_processed": len(all_resumes),
-            "rankings": ranking_results["rankings"]
+            "rankings": ranking_results["rankings"],
+            "failed_pdfs": failed_pdfs  # 🆕 Let Flutter know which PDFs failed
         }
+        
+        return response_data
         
     except Exception as e:
         print(f"❌ Error in rank-resumes: {str(e)}")
@@ -180,25 +261,23 @@ async def extract_text(request: ExtractTextRequest):
 @app.post("/rank", response_model=ComprehensiveResponse)
 async def rank_resumes(request: RankRequest):
     """
-    ✅ CORRECTED: Existing endpoint for base64 resume texts
+    ✅ Existing endpoint for base64 resume texts
     """
     print(f" Processing {len(request.resumes)} resumes with analyses: {request.analysis_types}")
     
-    # ✅ FIXED: Correct variable names
     if not request.job_description.strip():
         raise HTTPException(status_code=400, detail="Job description cannot be empty")
     
     if not request.resumes:
         raise HTTPException(status_code=400, detail="At least one resume is required")
     
-    # ✅ FIXED: Correct dictionary syntax
     results = {
         "job_description": request.job_description,
         "total_processed": len(request.resumes),
-        "rankings": [],  # ✅ COMMA, not semicolon!
-        "skill_analysis": [],  # ✅ COMMA, not semicolon!
-        "salary_predictions": [],  # ✅ COMMA, not semicolon!
-        "quality_scores": []  # ✅ No trailing comma/semicolon!
+        "rankings": [],
+        "skill_analysis": [],
+        "salary_predictions": [], 
+        "quality_scores": []
     }
     
     try:
