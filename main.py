@@ -250,7 +250,7 @@ async def rank_resumes_multiple_formats(
         # 2. Process CSV files (without pandas)
         for csv_file in csv_files:
             print(f"📁 Processing CSV: {csv_file.filename}")
-            if csv_file.content_type not in ["text/csv", "application/vnd.ms-excel"]:
+            if csv_file.content_type not in ["text/csv", "application/vnd.ms-excel", "application/octet-stream"]:
                 print(f"❌ Wrong content type: {csv_file.content_type}")
                 continue
             csv_resumes = process_csv_file(csv_file)
