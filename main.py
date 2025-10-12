@@ -153,15 +153,24 @@ def clean_pdf_text(text: str) -> str:
 def process_csv_file(csv_file: UploadFile) -> List[str]:
     """Process CSV file using built-in csv module (NO PANDAS)"""
     try:
+        print(f"📊 Processing CSV file: {csv_file.filename}")
+        
         # Read CSV content as text
         content = csv_file.file.read().decode('utf-8')
+        print(f"📄 CSV content size: {len(content)} chars")
+        print(f"📄 First 200 chars: {content[:200]}...")
+        
         lines = content.splitlines()
+        print(f"📋 CSV has {len(lines)} lines")
         
         # Parse CSV
         reader = csv.DictReader(lines)
+        print(f"📝 CSV headers: {reader.fieldnames}")
+        
         resumes = []
         
-        for row in reader:
+        for i, row in enumerate(reader):
+            print(f"  📄 Processing row {i}: {row}")
             parts = []
             # Check each field and add if present and not empty
             if row.get('name') and row['name'].strip():
@@ -175,12 +184,19 @@ def process_csv_file(csv_file: UploadFile) -> List[str]:
             
             # Only add if we have some content
             if parts:
-                resumes.append("\n".join(parts))
+                resume_text = "\n".join(parts)
+                resumes.append(resume_text)
+                print(f"  ✅ Added resume {i}: {len(resume_text)} chars")
+            else:
+                print(f"  ❌ Skipped empty row {i}")
         
-        print(f"📊 Processed {len(resumes)} resumes from CSV (without pandas)")
+        print(f"🎯 Processed {len(resumes)} resumes from CSV")
         return resumes
         
     except Exception as e:
+        print(f"💥 CSV processing error: {str(e)}")
+        import traceback
+        print(f"🔍 Stack trace: {traceback.format_exc()}")
         raise HTTPException(status_code=400, detail=f"CSV processing failed: {str(e)}")
 
 # 🆕 NEW ENDPOINT: Handle multiple file formats (PDF, CSV, Text)
@@ -233,9 +249,12 @@ async def rank_resumes_multiple_formats(
         
         # 2. Process CSV files (without pandas)
         for csv_file in csv_files:
+            print(f"📁 Processing CSV: {csv_file.filename}")
             if csv_file.content_type not in ["text/csv", "application/vnd.ms-excel"]:
+                print(f"❌ Wrong content type: {csv_file.content_type}")
                 continue
             csv_resumes = process_csv_file(csv_file)
+            print(f"📊 Got {len(csv_resumes)} resumes from CSV")
             all_resumes.extend(csv_resumes)
         
         # 3. Add text resumes directly
