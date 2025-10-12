@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from typing import List, Optional
 from hybrid_ranker import HybridResumeRanker
@@ -9,6 +9,7 @@ import os
 import base64
 import pdfplumber
 from io import BytesIO
+import pandas as pd
 
 load_dotenv()
 
@@ -25,7 +26,9 @@ advanced_analyzer = AdvancedResumeAnalysis()
 class RankRequest(BaseModel):
     job_description: str
     resumes: List[str]
-    analysis_types: Optional[List[str]] = ["ranking"]  # Specify what analyses to run
+    top_k: Optional[int] = 10
+    sbert_filter_size: Optional[int] = None
+    analysis_types: Optional[List[str]] = ["ranking"]
 
 class ExtractTextRequest(BaseModel):
     pdf_file: str  # base64 encoded PDF
@@ -47,33 +50,113 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     """
     try:
         text = ""
-        
         with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
             for page in pdf.pages:
-                # Extract text with layout preservation
                 page_text = page.extract_text()
                 if page_text:
                     text += page_text + "\n\n"
-        
         return text.strip()
-    
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"PDF text extraction failed: {str(e)}")
 
+def process_csv_file(csv_file: UploadFile) -> List[str]:
+    """Process CSV file and extract resumes"""
+    try:
+        df = pd.read_csv(csv_file.file)
+        resumes = []
+        
+        for _, row in df.iterrows():
+            parts = []
+            if 'name' in row and pd.notna(row['name']):
+                parts.append(f"Name: {row['name']}")
+            if 'experience' in row and pd.notna(row['experience']):
+                parts.append(f"Experience: {row['experience']}")
+            if 'skills' in row and pd.notna(row['skills']):
+                parts.append(f"Skills: {row['skills']}")
+            if 'resume_text' in row and pd.notna(row['resume_text']):
+                parts.append(f"Summary: {row['resume_text']}")
+            
+            if parts:
+                resumes.append("\n".join(parts))
+        
+        print(f"📊 Processed {len(resumes)} resumes from CSV")
+        return resumes
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"CSV processing failed: {str(e)}")
+
+# 🆕 NEW ENDPOINT: Handle multiple file formats (PDF, CSV, Text)
+@app.post("/api/rank-resumes")
+async def rank_resumes_multiple_formats(
+    pdf_files: List[UploadFile] = File([]),
+    csv_files: List[UploadFile] = File([]),
+    job_description: str = Form(...),
+    text_resumes: List[str] = Form([])
+):
+    """
+    🚀 NEW: Handle PDF, CSV, and text resumes in one endpoint
+    """
+    print(f"📁 Processing: {len(pdf_files)} PDFs, {len(csv_files)} CSVs, {len(text_resumes)} text resumes")
+    
+    all_resumes = []
+    
+    try:
+        # 1. Process PDF files
+        for pdf_file in pdf_files:
+            if pdf_file.content_type != "application/pdf":
+                continue
+            pdf_bytes = await pdf_file.read()
+            extracted_text = extract_text_from_pdf(pdf_bytes)
+            if extracted_text:
+                all_resumes.append(extracted_text)
+        
+        # 2. Process CSV files
+        for csv_file in csv_files:
+            if csv_file.content_type not in ["text/csv", "application/vnd.ms-excel"]:
+                continue
+            csv_resumes = process_csv_file(csv_file)
+            all_resumes.extend(csv_resumes)
+        
+        # 3. Add text resumes directly
+        all_resumes.extend(text_resumes)
+        
+        print(f"📊 Total resumes to process: {len(all_resumes)}")
+        
+        if not all_resumes:
+            raise HTTPException(status_code=400, detail="No valid resumes found in uploaded files")
+        
+        # Apply demo limits (8 resumes max)
+        if len(all_resumes) > 8:
+            all_resumes = all_resumes[:8]
+            print(f"📦 Limited to 8 resumes for demo")
+        
+        # 4. Use hybrid ranker (with text-only optimization)
+        ranking_results = ranker.process(
+            job_desc=job_description,
+            resumes=all_resumes,
+            top_k=8
+        )
+        
+        return {
+            "job_description": job_description,
+            "total_processed": len(all_resumes),
+            "rankings": ranking_results["rankings"]
+        }
+        
+    except Exception as e:
+        print(f"❌ Error in rank-resumes: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Resume ranking failed: {str(e)}")
+
+# 🟢 KEEP existing endpoints for backward compatibility
 @app.post("/extract-text", response_model=ExtractTextResponse)
 async def extract_text(request: ExtractTextRequest):
     """
-    Extract text from base64 encoded PDF - for Flutter app
+    Extract text from base64 encoded PDF
     """
     try:
-        # Validate base64
         if not request.pdf_file or len(request.pdf_file) < 100:
             return ExtractTextResponse(extracted_text="Error: Invalid or empty PDF file")
         
-        # Decode base64 PDF
         pdf_bytes = base64.b64decode(request.pdf_file)
-        
-        # Extract text using pdfplumber
         extracted_text = extract_text_from_pdf(pdf_bytes)
         
         if not extracted_text:
@@ -89,24 +172,25 @@ async def extract_text(request: ExtractTextRequest):
 @app.post("/rank", response_model=ComprehensiveResponse)
 async def rank_resumes(request: RankRequest):
     """
-    Comprehensive resume analysis with multiple AI-powered features
+    ✅ CORRECTED: Existing endpoint for base64 resume texts
     """
     print(f" Processing {len(request.resumes)} resumes with analyses: {request.analysis_types}")
     
-    # Validate input
+    # ✅ FIXED: Correct variable names
     if not request.job_description.strip():
         raise HTTPException(status_code=400, detail="Job description cannot be empty")
     
     if not request.resumes:
         raise HTTPException(status_code=400, detail="At least one resume is required")
     
+    # ✅ FIXED: Correct dictionary syntax
     results = {
         "job_description": request.job_description,
         "total_processed": len(request.resumes),
-        "rankings": [],
-        "skill_analysis": [],
-        "salary_predictions": [], 
-        "quality_scores": []
+        "rankings": [],  # ✅ COMMA, not semicolon!
+        "skill_analysis": [],  # ✅ COMMA, not semicolon!
+        "salary_predictions": [],  # ✅ COMMA, not semicolon!
+        "quality_scores": []  # ✅ No trailing comma/semicolon!
     }
     
     try:
@@ -114,7 +198,9 @@ async def rank_resumes(request: RankRequest):
         print(" Running SBERT + Gemini ranking...")
         ranking_results = ranker.process(
             job_desc=request.job_description,
-            resumes=request.resumes
+            resumes=request.resumes,
+            top_k=request.top_k,
+            sbert_filter_size=request.sbert_filter_size
         )
         results["rankings"] = ranking_results["rankings"]
         
@@ -149,7 +235,6 @@ async def rank_resumes(request: RankRequest):
 # Individual endpoints for specific analyses
 @app.post("/analyze-skills")
 async def analyze_skills(job_description: str, resume_text: str):
-    """Individual skill gap analysis endpoint"""
     try:
         return advanced_analyzer.skill_gap_analysis(job_description, resume_text)
     except Exception as e:
@@ -157,7 +242,6 @@ async def analyze_skills(job_description: str, resume_text: str):
 
 @app.post("/predict-salary")
 async def predict_salary(job_description: str, resume_text: str, location: str = "India"):
-    """Individual salary prediction endpoint"""
     try:
         return advanced_analyzer.predict_salary_range(job_description, resume_text, location)
     except Exception as e:
@@ -165,13 +249,12 @@ async def predict_salary(job_description: str, resume_text: str, location: str =
 
 @app.post("/check-quality") 
 async def check_quality(resume_text: str):
-    """Individual resume quality check endpoint"""
     try:
         return advanced_analyzer.analyze_quality(resume_text)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Quality check failed: {str(e)}")
 
-# Existing endpoints (unchanged)
+# Existing endpoints
 @app.get("/")
 async def root():
     return {
@@ -184,12 +267,12 @@ async def root():
 async def health_check():
     return {"status": "healthy", "service": "resume-screening-api"}
 
-# CORS middleware (important for Flutter)
+# CORS middleware
 from fastapi.middleware.cors import CORSMiddleware
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For development - restrict in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

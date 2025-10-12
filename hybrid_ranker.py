@@ -3,6 +3,8 @@ import requests
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 import google.generativeai as genai
+import re
+import time
 
 class HybridResumeRanker:
     def __init__(self):
@@ -16,41 +18,196 @@ class HybridResumeRanker:
     def process(self, job_desc: str, resumes: List[str], top_k: int = 10, 
                sbert_filter_size: Optional[int] = None) -> Dict:
         """
-        Enhanced process method with configurable SBERT filter size
+        Enhanced process method with text-only optimization
         
         Args:
             job_desc: Job description text
             resumes: List of resume texts
             top_k: Final number of top resumes to return
             sbert_filter_size: Number of resumes for SBERT to pass to Gemini
-                             If None, uses top_k (original behavior)
         """
-        # Determine SBERT filter size
-        filter_size = sbert_filter_size if sbert_filter_size is not None else top_k
+        # 🆕 NEW: Check if text-only mode should be used
+        all_are_clean_text = self._are_all_clean_text(resumes)
         
-        print(f" Processing {len(resumes)} resumes")
-        print(f" SBERT filter: {len(resumes)} → {filter_size} candidates")
-        print(f" Final return: top {top_k} ranked candidates")
+        if all_are_clean_text and len(resumes) <= 8:
+            print("🚀 TEXT-ONLY MODE: Using batch Gemini processing (fast)")
+            return self._batch_gemini_ranking(job_desc, resumes, top_k)
+        else:
+            print("🔀 HYBRID MODE: Using SBERT + Gemini flow")
+            # ✅ KEEP YOUR EXISTING HYBRID LOGIC:
+            filter_size = sbert_filter_size if sbert_filter_size is not None else top_k
+            
+            print(f" Processing {len(resumes)} resumes")
+            print(f" SBERT filter: {len(resumes)} → {filter_size} candidates")
+            print(f" Final return: top {top_k} ranked candidates")
+            
+            # Step 1: SBERT filtering via Hugging Face API
+            top_resumes = self._sbert_filter(job_desc, resumes, filter_size)
+            
+            # Step 2: Gemini scoring
+            ranked_results = self._get_gemini_scores(job_desc, top_resumes)
+            
+            # Final top-k selection
+            final_rankings = ranked_results[:top_k]
+            
+            print(f" Successfully processed {len(resumes)} resumes → {len(final_rankings)} final rankings")
+            
+            return {
+                "job_description": job_desc,
+                "total_processed": len(resumes),
+                "sbert_filtered": len(top_resumes),
+                "final_top_k": top_k,
+                "rankings": final_rankings
+            }
+    
+    def _are_all_clean_text(self, resumes: List[str]) -> bool:
+        """Check if all resumes are clean text (not PDF extractions)"""
+        for resume in resumes:
+            # PDF extraction often has these characteristics
+            if (len(resume.split()) > 1500 or  # Too long (PDF artifact)
+                '\x00' in resume or            # Null bytes (PDF)
+                resume.startswith('%PDF') or   # PDF header
+                '\\n\\n\\n' in resume or       # Excessive newlines (PDF)
+                len(resume.strip()) < 50):     # Too short
+                return False
+        return True
+    
+    def _batch_gemini_ranking(self, job_desc: str, resumes: List[str], top_k: int) -> Dict:
+        """Single API call for all text resumes"""
+        print(f"🎯 Batch processing {len(resumes)} text resumes in ONE Gemini call")
         
-        # Step 1: SBERT filtering via Hugging Face API
-        top_resumes = self._sbert_filter(job_desc, resumes, filter_size)
+        # Build batch prompt
+        resumes_formatted = ""
+        for i, resume in enumerate(resumes):
+            # Limit resume length to avoid token limits
+            truncated_resume = resume[:2000] + "..." if len(resume) > 2000 else resume
+            resumes_formatted += f"--- RESUME {i+1} ---\n{truncated_resume}\n\n"
         
-        # Step 2: Gemini scoring
-        ranked_results = self._get_gemini_scores(job_desc, top_resumes)
+        prompt = f"""
+        ACT as an expert resume screening AI. Evaluate how well each resume matches the job description.
         
-        # Final top-k selection
-        final_rankings = ranked_results[:top_k]
+        JOB DESCRIPTION:
+        {job_desc}
         
-        print(f" Successfully processed {len(resumes)} resumes → {len(final_rankings)} final rankings")
+        RESUMES TO ANALYZE:
+        {resumes_formatted}
+        
+        Provide your evaluation for EACH resume in this EXACT format:
+        RESUME 1: [score 1-10]|[2-3 sentence explanation]
+        RESUME 2: [score 1-10]|[2-3 sentence explanation]
+        ...
+        
+        Be strict but fair. Focus on relevant skills, experience, and qualifications.
+        """
+        
+        try:
+            response = self.gemini.generate_content(prompt)
+            print(f" Batch Gemini response received")
+            return self._parse_batch_response(response.text, resumes, job_desc, top_k)
+        except Exception as e:
+            print(f"❌ Batch Gemini failed: {e}, falling back to individual calls")
+            return self._fallback_individual_calls(job_desc, resumes, top_k)
+    
+    def _parse_batch_response(self, response_text: str, resumes: List[str], job_desc: str, top_k: int) -> Dict:
+        """Parse the batch Gemini response"""
+        results = []
+        lines = response_text.strip().split('\n')
+        
+        for i, resume in enumerate(resumes):
+            resume_score = 5.0  # Default score
+            explanation = "Evaluation completed"
+            
+            # Look for this resume in the response
+            resume_prefixes = [f"RESUME {i+1}", f"Resume {i+1}", f"{i+1}:"]
+            
+            for line in lines:
+                line_upper = line.upper()
+                if any(line_upper.startswith(prefix.upper()) for prefix in resume_prefixes):
+                    # Parse score and explanation
+                    if '|' in line:
+                        parts = line.split('|', 1)
+                        if parts[0].strip():
+                            # Extract score (look for numbers)
+                            numbers = re.findall(r'\d+\.?\d*', parts[0])
+                            if numbers:
+                                resume_score = min(10, max(1, float(numbers[0])))
+                        if len(parts) > 1:
+                            explanation = parts[1].strip()
+                    break
+            
+            results.append({
+                'resume_index': i,
+                'gemini_score': resume_score,
+                'sbert_similarity': 0.0,  # Not used in batch mode
+                'explanation': explanation,
+                'resume_preview': resume[:200] + "..." if len(resume) > 200 else resume
+            })
+        
+        # Sort by score and take top_k
+        results.sort(key=lambda x: x['gemini_score'], reverse=True)
+        final_rankings = results[:top_k]
         
         return {
             "job_description": job_desc,
             "total_processed": len(resumes),
-            "sbert_filtered": len(top_resumes),
+            "sbert_filtered": len(resumes),  # No SBERT filtering in batch mode
             "final_top_k": top_k,
             "rankings": final_rankings
         }
     
+    def _fallback_individual_calls(self, job_desc: str, resumes: List[str], top_k: int) -> Dict:
+        """Fallback to individual Gemini calls if batch fails"""
+        print("🔄 Falling back to individual Gemini calls")
+        results = []
+        
+        for i, resume in enumerate(resumes):
+            try:
+                prompt = f"""
+                Job: {job_desc}
+                Resume: {resume}
+                
+                Score: [1-10]
+                Explanation: [brief reason]
+                """
+                
+                response = self.gemini.generate_content(prompt)
+                score, explanation = self._parse_gemini_response(response.text)
+                
+                results.append({
+                    'resume_index': i,
+                    'gemini_score': score,
+                    'sbert_similarity': 0.0,
+                    'explanation': explanation,
+                    'resume_preview': resume[:200] + "..." if len(resume) > 200 else resume
+                })
+                
+                # Small delay to avoid rate limits
+                if i < len(resumes) - 1:
+                    time.sleep(2)
+                    
+            except Exception as e:
+                print(f"❌ Individual call failed for resume {i}: {e}")
+                results.append({
+                    'resume_index': i,
+                    'gemini_score': 5.0,
+                    'sbert_similarity': 0.0,
+                    'explanation': "Evaluation failed",
+                    'resume_preview': resume[:200] + "..." if len(resume) > 200 else resume
+                })
+        
+        # Sort by score and take top_k
+        results.sort(key=lambda x: x['gemini_score'], reverse=True)
+        final_rankings = results[:top_k]
+        
+        return {
+            "job_description": job_desc,
+            "total_processed": len(resumes),
+            "sbert_filtered": len(resumes),
+            "final_top_k": top_k,
+            "rankings": final_rankings
+        }
+    
+    #  KEEP ALL YOUR EXISTING METHODS (they remain unchanged):
     def _sbert_filter(self, job_desc: str, resumes: List[str], top_k: int) -> List[Dict]:
         """SBERT filtering via Hugging Face API"""
         print(f"🔍 Getting job description embedding...")
