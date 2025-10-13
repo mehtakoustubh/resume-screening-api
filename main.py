@@ -266,16 +266,16 @@ async def rank_resumes_multiple_formats(
             raise HTTPException(status_code=400, detail="No valid resumes found in uploaded files")
         
         # Apply demo limits (8 resumes max)
-        if len(all_resumes) > 8:
-            all_resumes = all_resumes[:8]
-            print(f" Limited to 8 resumes for demo")
+        #if len(all_resumes) > 8:
+         #   all_resumes = all_resumes[:8]
+          #  print(f" Limited to 8 resumes for demo")
         
         # 4. Use hybrid ranker
         print(" Starting hybrid ranking...")
         ranking_results = ranker.process(
             job_desc=job_description,
             resumes=all_resumes,
-            top_k=8
+            top_k=10
         )
         print(" Hybrid ranking completed")
         
